@@ -12,7 +12,7 @@ from app.services.hotspot_service import build_hotspot
 from app.services.matching_service import match_product
 from app.services.pdf_service import (
     extract_pdf_text_and_blocks,
-    render_pdf_pages_to_images,
+    iter_pdf_pages_to_images,
     upload_page_image_to_r2,
 )
 
@@ -106,13 +106,7 @@ async def importar_catalogo(
             "message": "PDF sem texto extraivel; configuracao manual necessaria",
         }
 
-    rendered_pages = render_pdf_pages_to_images(pdf_bytes)
-    rendered_by_number = {page["page_number"]: page for page in rendered_pages}
-
-    for page_data in pdf_data["pages"]:
-        page_image = rendered_by_number.get(page_data["page_number"])
-        if page_image is None:
-            continue
+    for page_data, page_image in zip(pdf_data["pages"], iter_pdf_pages_to_images(pdf_bytes)):
         image_url = upload_page_image_to_r2(page_image, catalogo.id)["public_url"]
         pagina = repo.add_pagina(
             catalogo_id=catalogo.id,

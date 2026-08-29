@@ -76,32 +76,30 @@ def extract_pdf_text_and_blocks(pdf_bytes: bytes) -> dict[str, Any]:
         document.close()
 
 
-def render_pdf_pages_to_images(pdf_bytes: bytes) -> list[dict[str, Any]]:
+def iter_pdf_pages_to_images(pdf_bytes: bytes):
     try:
         document = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception:
-        return []
+        return
 
     try:
-        rendered_pages: list[dict[str, Any]] = []
-
         for page_number in range(document.page_count):
             page = document[page_number]
             matrix = fitz.Matrix(2, 2)
             pix = page.get_pixmap(matrix=matrix)
             image_bytes = pix.tobytes("png")
-            rendered_pages.append(
-                {
-                    "page_number": page_number + 1,
-                    "width": float(page.rect.width),
-                    "height": float(page.rect.height),
-                    "image_bytes": image_bytes,
-                    "image_name": f"page_{page_number + 1}.png",
-                }
-            )
-
-        return rendered_pages
+            yield {
+                "page_number": page_number + 1,
+                "width": float(page.rect.width),
+                "height": float(page.rect.height),
+                "image_bytes": image_bytes,
+                "image_name": f"page_{page_number + 1}.png",
+            }
     except Exception:
-        return []
+        return
     finally:
         document.close()
+
+
+def render_pdf_pages_to_images(pdf_bytes: bytes) -> list[dict[str, Any]]:
+    return list(iter_pdf_pages_to_images(pdf_bytes))
