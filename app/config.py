@@ -16,6 +16,7 @@ class Settings:
     r2_public_url: str = os.getenv("R2_PUBLIC_URL", "")
     backend_url: str = os.getenv("BACKEND_URL", "")
     frontend_url: str = os.getenv("FRONTEND_URL", "")
+    cors_origins: str = os.getenv("CORS_ORIGINS", "")
 
 
 settings = Settings()
