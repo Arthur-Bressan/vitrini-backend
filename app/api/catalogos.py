@@ -10,7 +10,11 @@ from app.models.catalogo import Catalogo, Hotspot, Pagina, Produto
 from app.repositories.catalogo_repository import CatalogoRepository
 from app.services.hotspot_service import build_hotspot
 from app.services.matching_service import match_product
-from app.services.pdf_service import extract_pdf_text_and_blocks, render_pdf_pages_to_images
+from app.services.pdf_service import (
+    extract_pdf_text_and_blocks,
+    render_pdf_pages_to_images,
+    upload_page_image_to_r2,
+)
 
 router = APIRouter(prefix="/catalogos", tags=["catalogos"])
 
@@ -102,15 +106,18 @@ async def importar_catalogo(
             "message": "PDF sem texto extraivel; configuracao manual necessaria",
         }
 
+    rendered_pages = render_pdf_pages_to_images(pdf_bytes)
+    rendered_by_number = {page["page_number"]: page for page in rendered_pages}
+
     for page_data in pdf_data["pages"]:
-        image_result = render_pdf_pages_to_images(pdf_bytes)
-        page_image = next((item for item in image_result if item["page_number"] == page_data["page_number"]), None)
+        page_image = rendered_by_number.get(page_data["page_number"])
         if page_image is None:
             continue
+        image_url = upload_page_image_to_r2(page_image, catalogo.id)["public_url"]
         pagina = repo.add_pagina(
             catalogo_id=catalogo.id,
             numero=page_data["page_number"],
-            url_imagem=f"/images/{catalogo.id}/{page_image['image_name']}",
+            url_imagem=image_url,
             texto_extraido=page_data["text"],
             width=int(page_data["width"]),
             height=int(page_data["height"]),
