@@ -1,22 +1,26 @@
 from __future__ import annotations
 
+import shutil
+import tempfile
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.catalogo import Catalogo, Hotspot, Pagina, Produto
 from app.repositories.catalogo_repository import CatalogoRepository
-from app.services.hotspot_service import build_hotspot
-from app.services.matching_service import match_product
-from app.services.pdf_service import (
-    extract_pdf_text_and_blocks,
-    iter_pdf_pages_to_images,
-    upload_page_image_to_r2,
-)
+from app.services.catalog_import_service import process_catalog_import
 
 router = APIRouter(prefix="/catalogos", tags=["catalogos"])
+
+
+@router.get("/{catalogo_id}/status")
+def get_catalogo_status(catalogo_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    catalogo = db.query(Catalogo).filter(Catalogo.id == catalogo_id).first()
+    if not catalogo:
+        raise HTTPException(status_code=404, detail="Catalogo nao encontrado")
+    return {"catalogo_id": catalogo.id, "status": catalogo.status, "observacao": catalogo.observacao}
 
 
 @router.get("/{catalogo_id}")
@@ -84,106 +88,28 @@ def update_hotspot(hotspot_id: int, payload: dict[str, Any], db: Session = Depen
     return {"id": hotspot.id, "status": hotspot.status, "x_percent": hotspot.x_percent, "y_percent": hotspot.y_percent}
 
 
-@router.post("/importar")
+@router.post("/importar", status_code=status.HTTP_202_ACCEPTED)
 async def importar_catalogo(
     pdf: UploadFile,
+    background_tasks: BackgroundTasks,
     planilha: UploadFile | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     repo = CatalogoRepository(db)
-    catalogo = repo.create_catalogo(titulo=pdf.filename or "Catalogo importado", status="importando")
+    catalogo = repo.create_catalogo(titulo=pdf.filename or "Catalogo importado", status="processando")
+    pdf_file = tempfile.NamedTemporaryFile(prefix="catalogo_", suffix=".pdf", delete=False)
+    try:
+        shutil.copyfileobj(pdf.file, pdf_file)
+        pdf_file.close()
+        spreadsheet_path = None
+        if planilha is not None:
+            sheet_file = tempfile.NamedTemporaryFile(prefix="catalogo_", suffix=".xlsx", delete=False)
+            shutil.copyfileobj(planilha.file, sheet_file)
+            sheet_file.close()
+            spreadsheet_path = sheet_file.name
+        background_tasks.add_task(process_catalog_import, catalogo.id, pdf_file.name, spreadsheet_path)
+    except Exception:
+        pdf_file.close()
+        raise
 
-    pdf_bytes = await pdf.read()
-    pdf_data = extract_pdf_text_and_blocks(pdf_bytes)
-    if not pdf_data["has_extractable_text"]:
-        catalogo.status = "configuracao_manual"
-        catalogo.observacao = "PDF sem texto extraivel; configuracao manual necessaria"
-        db.commit()
-        return {
-            "catalogo_id": catalogo.id,
-            "status": catalogo.status,
-            "resumo": {"total": 0, "identificados": 0, "precisa_revisao": 0, "nao_encontrados": 0},
-            "message": "PDF sem texto extraivel; configuracao manual necessaria",
-        }
-
-    for page_data, page_image in zip(pdf_data["pages"], iter_pdf_pages_to_images(pdf_bytes)):
-        image_url = upload_page_image_to_r2(page_image, catalogo.id)["public_url"]
-        pagina = repo.add_pagina(
-            catalogo_id=catalogo.id,
-            numero=page_data["page_number"],
-            url_imagem=image_url,
-            texto_extraido=page_data["text"],
-            width=int(page_data["width"]),
-            height=int(page_data["height"]),
-        )
-        for block in page_data["blocks"]:
-            hotspot_data = build_hotspot(
-                page_data["width"],
-                page_data["height"],
-                block["x0"],
-                block["y0"],
-                width=block["x1"] - block["x0"],
-                height=block["y1"] - block["y0"],
-            )
-            repo.add_hotspot(
-                pagina_id=pagina.id,
-                x_percent=hotspot_data["x_percent"],
-                y_percent=hotspot_data["y_percent"],
-                confianca=0.8,
-                metodo="pdf_text_block",
-                status="pendente",
-            )
-
-    if planilha is not None:
-        planilha_bytes = await planilha.read()
-        import pandas as pd
-        from io import BytesIO
-
-        dataframe = pd.read_excel(BytesIO(planilha_bytes), engine="openpyxl")
-        required = {"codigo", "nome"}
-        for _, row in dataframe.iterrows():
-            if not required.issubset(row.index):
-                continue
-            codigo = row.get("codigo")
-            nome = row.get("nome")
-            if pd.isna(codigo) or pd.isna(nome):
-                continue
-            repo.add_produto(catalogo_id=catalogo.id, codigo=str(codigo), nome=str(nome))
-
-    produtos = [
-        {"id": produto.id, "codigo": produto.codigo, "nome": produto.nome}
-        for produto in db.query(Produto).filter(Produto.catalogo_id == catalogo.id).all()
-    ]
-    hotspots = db.query(Hotspot).join(Pagina).filter(Pagina.catalogo_id == catalogo.id).all()
-    identificados = 0
-    precisa_revisao = 0
-    nao_encontrados = 0
-
-    for hotspot in hotspots:
-        target = {"codigo": "", "nome": ""}
-        if hotspot.pagina.texto_extraido:
-            lines = [line.strip() for line in hotspot.pagina.texto_extraido.splitlines() if line.strip()]
-            if lines:
-                target["nome"] = lines[0][:120]
-        result = match_product(produtos, target)
-        if result["product_id"] is None:
-            nao_encontrados += 1
-            hotspot.status = "pendente"
-            continue
-        hotspot.produto_id = result["product_id"]
-        hotspot.status = "confirmado"
-        hotspot.confianca = 0.9
-        identificados += 1
-
-    catalogo.status = "importado"
-    db.commit()
-    return {
-        "catalogo_id": catalogo.id,
-        "status": catalogo.status,
-        "resumo": {
-            "total": len(hotspots),
-            "identificados": identificados,
-            "precisa_revisao": precisa_revisao,
-            "nao_encontrados": nao_encontrados,
-        },
-    }
+    return {"catalogo_id": catalogo.id, "status": catalogo.status, "message": "Importacao iniciada"}

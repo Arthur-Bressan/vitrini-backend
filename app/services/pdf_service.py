@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Any
 
 import fitz
@@ -33,9 +34,15 @@ def upload_page_image_to_r2(page_image: dict[str, Any], catalogo_id: int, prefix
         }
 
 
-def extract_pdf_text_and_blocks(pdf_bytes: bytes) -> dict[str, Any]:
+def _open_pdf(source: bytes | str | Path):
+    if isinstance(source, (str, Path)):
+        return fitz.open(filename=str(source))
+    return fitz.open(stream=source, filetype="pdf")
+
+
+def extract_pdf_text_and_blocks(pdf_bytes: bytes | str | Path) -> dict[str, Any]:
     try:
-        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        document = _open_pdf(pdf_bytes)
     except Exception as exc:  # pragma: no cover - defensive path in real imports
         return {"pages": [], "has_extractable_text": False, "error": str(exc)}
 
@@ -76,9 +83,9 @@ def extract_pdf_text_and_blocks(pdf_bytes: bytes) -> dict[str, Any]:
         document.close()
 
 
-def iter_pdf_pages_to_images(pdf_bytes: bytes):
+def iter_pdf_pages_to_images(pdf_bytes: bytes | str | Path):
     try:
-        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        document = _open_pdf(pdf_bytes)
     except Exception:
         return
 
@@ -101,5 +108,5 @@ def iter_pdf_pages_to_images(pdf_bytes: bytes):
         document.close()
 
 
-def render_pdf_pages_to_images(pdf_bytes: bytes) -> list[dict[str, Any]]:
+def render_pdf_pages_to_images(pdf_bytes: bytes | str | Path) -> list[dict[str, Any]]:
     return list(iter_pdf_pages_to_images(pdf_bytes))
